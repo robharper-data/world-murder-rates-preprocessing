@@ -1,0 +1,763 @@
+---
+title: "World Murder Rates: Data Preprocessing in R"
+author: 'Robert Harper & Sanjay Addihally Lakshmegowda'
+date: "May 2024"
+output:
+  html_notebook: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+  word_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+```{css, echo=FALSE}
+  body {
+  font-size: 12px;
+}
+```
+---
+
+## **Setup**
+
+```{r include=FALSE}
+# Loading the necessary packages required to reproduce the report.
+library(kableExtra)
+library(magrittr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(outliers)
+library(forecast)
+library(moments)
+
+# Setting up custom functions
+
+# Function to cap outliers based on quantiles and IQR
+cap <- function(x){
+    quantiles <- quantile( x, c(.05, 0.25, 0.75, .95 ) )
+    x[ x < quantiles[2] - 1.5*IQR(x) ] <- quantiles[1]
+    x[ x > quantiles[3] + 1.5*IQR(x) ] <- quantiles[4]
+    x
+}
+
+# Function to count the number of outliers in a dataset using IQR [4]
+count_outliers <- function(data) {
+  Q1 <- quantile(data, 0.25)
+  Q3 <- quantile(data, 0.75)
+  IQR <- Q3 - Q1
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  outliers <- data[data < lower_bound | data > upper_bound]
+  number_of_outliers <- length(outliers)
+  return(number_of_outliers)
+}
+
+# Function to find strings in data that improperly format numerical values with 'k'
+find_values_with_k <- function(x) {
+  grepl("[^0-9.k]$|[^0-9]+$", x, ignore.case = TRUE)
+}
+```
+
+In this step, all the necessary libraries have been loaded and additional custom functions have been established to aid in data
+pre-processing and simplify subsequent tasks. Custom function descriptions:
+
+-   **cap function**: Created to cap extreme values in a dataset by
+    setting values below and above a calculated threshold to the 5th and
+    95th percentiles, respectively. This is used to reduce the influence
+    of outliers.
+
+-   **count_outliers function**: Developed to count the number of
+    outliers in a dataset based on the interquartile range (IQR) method.
+    Outliers are defined as observations significantly higher or lower
+    than the rest of the data (1.5 times the IQR from the 25th and 75th
+    percentiles).
+
+-   **find_values_with_k function**: Searches for strings that
+    improperly format numerical values with 'k' (as in thousands),
+    ensuring numerical data is consistent and accurately represented
+    without additional characters.
+
+## **Executive Summary**
+
+**Summary of Preprocessing:**
+
+-   Two data sets were loaded into R.
+-   Due to issues with merging we were forced to use the read.csv
+    function for the population data and then rename some of the
+    columns.
+-   Both datasets were in an 'untidy' so tidying was done on both data
+    sets prior to joining them
+-   The datasets were merged using an inner join, connecting them on
+    common country and year. An inner join was chosen as we were not
+    interested in countries or years that we didn't have the full set of
+    data for the mutated column.
+-   The merged dataset was arranged by country then by year for better
+    readability
+-   The new variable that is created is done through mathematical
+    operations on two variables in the merged data set. In order to
+    create this new variable, one of the variables in the merged data
+    set needed to be cleaned first, as it contained inconsistent data.
+    Once it was cleaned, the new variable could be created. This process
+    accounted for some of the work that would have been done in the
+    'Scan I' section
+-   The merged data was then scanned for missing values, which there
+    were none.
+-   The merged data was then checked for outliers, which there were
+    many. Most of the numerical data was severely skewed, so only one
+    variable was suitable for outlier handling prior to transformation.
+-   The other variables were transformed. Several transformations were
+    tried for each variable; only the most effective is run, and the
+    others are left commented out to show what was attempted.
+-   The number of outliers and improvement in normality was observed in
+    the transformed variables.
+-   After the transformations were complete, the remaining outliers
+    were capped and the final transformed data was displayed using
+    boxplots.
+
+## **Data**
+
+For this project, we have used two datasets: one detailing
+population statistics and the other documenting number of murders across
+various countries.
+
+### Population Dataset [2]
+
+The first dataset 'world_population' shows population data for 234
+countries across different year periods.
+
+**Description:**
+
+-   **RANK:** A country's ranking in order of most populated to least
+    populated.
+-   **CCA3:** 3 Code assigned to each country.
+-   **Country/Territories:** Name of Country or territory.
+-   **Capital:** Name of the capital of a country.
+-   **Continent:** Name of the Continent a country belongs to.
+-   **2022 Population:** Population of the Country or Territories for
+    the year 2022.
+-   **2020 Population:** Population of the Country or Territories for
+    the year 2020.
+-   **2015 Population:** Population of the Country or Territories for
+    the year 2015.
+-   **2010 Population:** Population of the Country or Territories for
+    the year 2010.
+-   **2000 Population:** Population of the Country or Territories for
+    the year 2000.
+-   **1990 Population:** Population of the Country or Territories for
+    the year 1990.
+-   **1980 Population:** Population of the Country or Territories for
+    the year 1980.
+-   **1970 Population:** Population of the Country or Territories for
+    the year 1970.
+-   **Area (km²):** Area size of the Country or Territories in square
+    kilometers.
+-   **Density (per km²):** Density of population per square kilometer.
+-   **Growth Rate:** Population Growth Rate (%).
+-   **World Population Percentage:** The population percentage by each
+    Country/Territories.
+
+### Murders Dataset [1]
+
+The second dataset 'murder_total_deaths' contains information about the
+number of murders in 204 countries for each year from 1990 to 2019.
+
+**Description:**
+
+-   **Country:** Name of country or territory.
+-   **1990:** Number of murders for each country in 1990.
+-   **1991:** Number of murders for each country in 1991.
+-   **1992:** ...
+-   **2018:** Number of murders for each country in 2018.
+-   **2019:** Number of murders for each country in 2019.
+
+```{r}
+# Load the dataset 1
+population <- read.csv('data/world_population.csv')
+head(population)
+```
+
+```{r}
+# Load the dataset 2
+crime <- read_csv('data/murder_total_deaths.csv')
+head(crime)
+```
+
+## **Tidy & Manipulate Data I**
+
+```{r}
+# Tidy & Manipulate Data I 
+# Print original column names
+print("Original column names:")
+print(colnames(population))
+```
+
+```{r}
+# Specific columns to rename
+columns_to_rename <- c("X2022.Population","X2020.Population", "X2015.Population", "X2010.Population", "X2000.Population", "X1990.Population", "X1980.Population", "X1970.Population")
+
+# Rename only selected columns using gsub to remove 'X' and '.Population' [5]
+colnames(population)[colnames(population) %in% columns_to_rename] <- gsub("X|\\.Population", "", colnames(population)[colnames(population) %in% columns_to_rename])
+
+#renaming the other column names
+population <- population %>%
+  rename(Country = Country.Territory , Country_code = CCA3, World_Population_Percentage = World.Population.Percentage, Growth_Rate = Growth.Rate)
+```
+
+```{r}
+#converting from wider to longer
+population_tidy <- population %>% gather('2022', '2020','2015','2010','2000','1990','1980','1970', key = "year", value = "Population")
+```
+
+```{r echo=TRUE}
+# Define the new order of columns
+new_order <- c("Rank", "Country_code", "Country", "Capital", "Continent", 
+               "year", "Population", "Area..km..", "Density..per.km..", "Growth_Rate", 
+               "World_Population_Percentage")
+
+# Reorder the columns according to the new order
+population_tidy <- population_tidy[, new_order]
+head(population_tidy, n = 5)
+```
+
+```{r}
+# Tidy & Manipulating Data II 
+crime_tidy <- crime %>%
+  pivot_longer(names_to = "year", 
+               values_to = "Total_No_of_murders", 
+               cols = -country)
+head(crime_tidy, n=5)
+
+```
+
+```{r}
+#merging the data
+merged_data <-population_tidy %>%
+  inner_join(crime_tidy,c("year" = "year", "Country" = "country")) %>%
+  arrange(Country)
+head(merged_data, n=5)
+
+```
+
+**Rationale for Tidying**: Both original datasets were considered
+'untidy' due to their structure, with year values spread across multiple
+columns as headers. Converting these to a long format simplifies merging
+and subsequent analyses. The year and country are the key variable for
+merging, and organizing the data into a long format addresses the
+challenge of having multiple years in multiple columns.
+
+In this step, we are performing several data manipulation tasks to tidy
+up and merge two datasets, one detailing population statistics and the
+other documenting murder rates, focusing on aligning them for
+comparative analysis over various years.
+
+-   **Renaming Columns**: We start by renaming specific columns in the
+    population dataset. The column names like "X2022.Population" are
+    reformatted to just represent the year ("2022"). This is done using
+    **`gsub`** to remove extraneous characters ('X' and '.Population').
+
+-   **Additional Renaming**: We then rename other columns for clarity
+    and consistency, such as changing 'Country.Territory' to 'Country',
+    'CCA3' to 'Country_code', etc.
+
+-   **Reshaping Data**: The population data, which is initially in a
+    wide format with separate columns for each year, is transformed into
+    a long format using the **`gather`** function. This format makes
+    each row represent a single year's data for a country, making it
+    easier to compare across datasets.
+
+-   **Reordering Columns**: After reshaping, the columns are reordered
+    to a more logical sequence for analysis, emphasizing geographical
+    and demographic attributes followed by year and population details.
+
+-   **Tidying Crime Data**: Similarly, the crime dataset is tidied using
+    **`pivot_longer`** to transform it from a wide format (with years as
+    columns) to a long format, where each row now represents the number
+    of murders for a specific year and country.
+
+-   **Merging Data**: Both tidied datasets are then merged using an
+    inner join on 'year' and 'Country'. This method is chosen to avoid
+    generating many null values, as there are limited overlapping years
+    between the datasets.
+
+By tidying the datasets first and then merging, ensured that the data is
+organized and easier to handle, extract accurate and insightful
+comparative analysis between population dynamics and murder rates across
+countries.
+
+## **Understand**
+
+```{r}
+str(merged_data)
+merged_data %>% colnames()
+merged_data %>% dim()
+merged_data %>% head()
+```
+
+```{r}
+#converting the variables.
+merged_data$year <- as.factor(merged_data$year)
+merged_data$Population <- as.double(merged_data$Population)
+merged_data$Area..km.. <- as.numeric(merged_data$Area..km..)
+# Converting the datatype from character to factor and labelling it.
+merged_data$Continent <- as.factor(merged_data$Continent)
+merged_data$Continent <- factor(merged_data$Continent, levels = c("Asia", "Europe", "Africa", "Oceania", "North America", "South America" ),
+labels = c("AS", "EU", "AF", "OC", "NA", "SA"))
+levels(merged_data$year)
+levels(merged_data$Continent)
+head(merged_data)
+str(merged_data)
+
+```
+
+**In this step the tasks performed are as follows:**
+
+**Summary of Variables and Data Structure**
+
+The merged_data dataset comprises of 756 rows and 12 columns, which
+includes a variety of columns with different data types, which are
+outlined below:
+
+-   **Rank, Population, Area..km.. :** Integer (Population and Area will
+    be converted to Numeric for precise calculations).
+
+-   **Country_code, Country, Capital, Continent, Year:** Character (Year
+    and Continent will be converted to Factor for better
+    categorization).
+
+-   **Density..per km.., Growth_Rate, World_Population_Percentage:**
+    Numeric
+
+-   **Total_No_of_murders:** Character
+
+**Data Type Conversions**
+
+To optimize our dataset for upcoming analyses, we've made several key
+data type conversions:
+
+-   **Year:** Converted from character to factor.
+
+    **Reason:** The year column contains only the year information
+    (e.g., "1990", "2000") without any specific month or day. Converting
+    it to a factor is suitable for categorical analysis, allowing us to
+    treat each year as a distinct category.
+
+-   **Population and Area..km..:** Converted to numeric types.
+
+    **Reason:** These columns are originally integers. Converting them
+    to numeric (double for Population and numeric for Area..km..)
+    ensures accurate numerical calculations and consistency in data
+    operations.
+
+-   **Continent:** Converted from character to factor with specific
+    labels.
+
+    **Reason:** The Continent column is originally a character.
+    Converting it to a factor with labels ("AS" for Asia, "EU" for
+    Europe, "AF" for Africa, "OC" for Oceania, "NA" for North America,
+    "SA" for South America) facilitates easier categorization and
+    analysis, allowing us to perform operations specific to different
+    continents more efficiently.
+
+**Summary of Data Types**
+
+After these steps, the data set has:
+
+-   **Multiple Data Types:** The data set includes numeric, character,
+    and factor variables.
+
+-   **Data Type Conversions:** Applied conversions from character to
+    factor (year, Continent), integer to double (Population), and
+    integer to numeric (Area..km..).
+
+-   **Factor Variable Labeling:** The Continent variable is converted to
+    a factor with labeled levels representing different continents.
+
+## **Tidy & Manipulate Data II**
+
+```{r}
+# Apply the custom created function to find entries ending with 'k'
+values_with_k <- sapply(merged_data$Total_No_of_murders, find_values_with_k)
+
+# Display the values that end with 'k'
+k_values <- merged_data$Total_No_of_murders[values_with_k]
+
+special_data <- merged_data[values_with_k, c("Country", "Total_No_of_murders")]
+head(special_data, n = 5)
+```
+
+```{r}
+# Convert only those values that end with 'k'
+merged_data$Total_No_of_murders[values_with_k] <- sapply (merged_data$Total_No_of_murders[values_with_k], function(x) {
+  as.numeric(sub("[^0-9.k]$|[^0-9]+$", "", x)) * 1000 })
+str(merged_data)
+
+merged_data$Total_No_of_murders  <- as.numeric(merged_data$Total_No_of_murders)
+
+merged_data <- merged_data %>%
+  mutate(murder_rate_per100k = (`Total_No_of_murders` / `Population`) * 100000)
+
+head(merged_data, n = 5)
+```
+
+In this step we faced challenges with the 'Total_No_of_murders' column,
+which contained character-type entries due to some figures being
+expressed with the letter 'k' to denote thousands. To ensure accuracy in
+our analysis of murder rates, it was crucial to convert these entries
+into a numeric format. We began by creating a function to identify entries 
+ending with 'k', signifying that these murder counts were recorded in thousands.
+After applying this function to the relevant column, we isolated and reviewed 
+the affected rows confirming that there were 40 entries containing 'k'. 
+Subsequently, we converted these 'k' values by removing the letter, transforming 
+the remaining figures to numeric values, and multiplying by 1,000 to adjust for 
+the proper scale. Once all entries in the 'Total_No_of_murders' column were
+standardized to numeric data types, we proceeded to calculate the murder rate 
+per 100,000 population. This involved dividing the total murders by the 
+population for each entry and scaling the result to a standardized rate per 
+100,000. Finally, we updated the dataset to include a new mutated column, 
+**'murder_rate_per100k'**, and displayed the first few rows to verify the 
+successful integration of this data.
+
+## **Scan I**
+
+```{r}
+# Count missing values across the merged data
+null_val <- sum(is.na(merged_data))
+print(paste("The number of Null Values are: ", null_val))
+```
+
+In this step, we checked for missing values, which is important as they can lead to bias or incorrect analysis down the track. In this data, no missing values were found. This can largely be attributed to the use of an inner join used in the previous steps. The handling of special values and inconsistencies has already been addressed in a previous cleaning phase (Tidy and Manipulate II). Special values (like those containing 'k') were identified and corrected.
+
+## **Scan II**
+
+```{r}
+#Scanning for outliers
+#Create variable names for each numeric variable
+population <- merged_data$Population
+area <- merged_data$Area..km..
+density <- merged_data$Density..per.km..
+growth <- merged_data$Growth_Rate
+pop_percent <- merged_data$World_Population_Percentage
+murders <- merged_data$Total_No_of_murders
+murder_rate <- merged_data$murder_rate_per100k
+
+#Viewing data in boxplot to see shape
+par(mfrow = c(3, 3), oma = c(0, 0, 3, 0), mar = c(1, 3, 4, 2) + 0.1)
+population %>%  boxplot(main="Boxplot of Population", ylab="Population", col = "green")
+print(paste("The skewness of population is: ", skewness(population)))
+
+area %>%  boxplot(main="Boxplot of Area(km^2)", ylab="Area(km^2)", col = "green")
+print(paste("The skewness of area is: ", skewness(area)))
+
+density %>%  boxplot(main="Boxplot of Population Density", ylab="Density per km^2", col = "green")
+print(paste("The skewness of density is: ", skewness(density)))
+
+growth %>%  boxplot(main="Boxplot of Growth Rate", ylab="Growth Rate", col = "green")
+print(paste("The skewness of growth is: ", skewness(growth)))
+
+pop_percent %>%  boxplot(main="Boxplot of Population Percentage", ylab="Population Percentage", col = "green")
+print(paste("The skewness of pop_percent is: ", skewness(pop_percent)))
+
+murders %>% boxplot(main="Boxplot of Number of Murders", ylab="Number of Murders", col = "green")
+print(paste("The skewness of murders is: ", skewness(murders)))
+
+murder_rate %>% boxplot(main="Boxplot of Murders per 100k", ylab="Number of Murders", col = "green")
+print(paste("The skewness of murder rate is: ", skewness(murder_rate)))
+
+#Handle Growth Rate Outliers
+growth_outliers <- growth %>% count_outliers()
+shapiro.test(growth)
+print(paste("The number of outliers in growth_rate is: ", growth_outliers)) #8
+growth_outliers_capped <- growth %>% cap()
+growth_outliers_capped %>%  boxplot(main="Boxplot of Growth Rate with outliers capped", ylab="Growth Rate", col = "blue", cex.main = 0.8)
+growth_outliers_capped %>% count_outliers()
+shapiro.test(growth_outliers_capped)
+
+mtext("Boxplots of Numeric Variables: Checking for Outliers", outer = TRUE, cex = 1.5)
+
+```
+
+It is evident from the boxplots generated (and skewness values) that all numeric variables aside from 'Growth_rate' are severely skewed, with many outliers. In order to handle these severely skewed variables, transformations will be done prior to outlier handling. Growth_rate appears relatively normally distributed compared to other variables however when looking at the skewness (and shaprio wilk test) strictly speaking, it cannot be considered to be normally distributed. An attempt was made to transform this dataset before removing outliers, however the number of outliers increased from 8 to 12, although this may seem negligible, this could affect any future statistical analysis, so the decision was made to cap outliers before any kind of normalisation was applied. An outlier counter function using Tukey's method was created in the setup and applied here to confirm the outliers were handled. Growth rate was therefore not transformed.
+
+## **Transform**
+
+```{r}
+#Transform Population
+#Setup dimensions for output
+#par(mfrow = c(6, 2), oma = c(0, 0, 3, 0), mar = c(2, 2, 2, 2) + 0.1)
+par(mfrow = c(3, 4), oma = c(0, 0, 3, 0), mar = c(2, 2, 2, 2) + 0.1)
+#Firstly, baseline test on original data and count no of outliers
+shapiro.test(population)
+population_outliers <- population %>% count_outliers()
+print(paste("The number of outliers in population is: ", population_outliers))
+
+#Transformation Trial and error
+
+#BoxCox
+BoxCox_pop <- BoxCox(population, lambda = "auto")
+BoxCox_pop %>% hist(main="Normalised Population", ylab="Population", cex.main = 0.8)
+shapiro.test(BoxCox_pop) #BoxCox transformation was the most suitable for this. None of the transformations were perfect at getting the data into a normal distribution but boxcox performed the best with the highest W score and highest P value. P values were all still < 0.05 so the null hypothesis of normality is rejected.
+
+# #log
+# pop_log <- log(population)
+# hist(pop_log)
+# shapiro.test(pop_log)
+# 
+# #sqrt
+# sqrt_pop <- sqrt(population)
+# hist(sqrt_pop)
+# shapiro.test(sqrt_pop)
+
+# Print the skewness value
+print(paste("Skewness of Box-Cox transformed population ata:", skewness(BoxCox_pop)))
+
+# Calculate and Print the number of outliers
+number_of_outliers_popT <- BoxCox_pop %>% count_outliers()
+print(paste("Number of outliers in population after transformation is: ", number_of_outliers_popT))
+
+# Cap Outliers
+BoxCox_pop_outliers_removed <- BoxCox_pop %>% cap()
+BoxCox_pop_outliers_removed %>% count_outliers()
+BoxCox_pop_outliers_removed %>% boxplot(main="Normalised Population (outliers capped)", ylab="Population", col = "green", cex.main = 0.8)
+#mtext("Population Normalised + Outliers Capped", outer = TRUE, cex = 1.2)
+################################################################################
+# Transform Area(km^2)
+#Setup dimensions for output
+#par(mfrow = c(1, 2), oma = c(0, 0, 3, 0), mar = c(5, 4, 4, 2) + 0.1)
+
+# Baseline test on original data and count number of outliers
+shapiro.test(area)
+area_outliers <- area %>% count_outliers()
+print(paste("The number of outliers in area is: ", area_outliers)) #68
+
+#Transformation Trial and error
+
+# #BoxCox
+# BoxCox_Area <- BoxCox(area, lambda = "auto")
+# hist(BoxCox_Area)
+# shapiro.test(BoxCox_Area) # ERROR/warnings - ineffective - unsure why
+
+#log
+area_log <- log(area)
+hist(area_log, main="Normalised Area(Km^2)", ylab="Area(Km^2)", cex.main = 0.8)
+shapiro.test(area_log) #This transformation is the most effective 
+
+# #sqrt
+# sqrt_area <- sqrt(area)
+# hist(sqrt_area)
+# shapiro.test(sqrt_area)
+# 
+# #cuberoot
+# cuberoot_area <- (area)^(1/3)
+# hist(cuberoot_area)
+# shapiro.test(cuberoot_area)
+
+# Print the skewness value for the transformed data
+print(paste("Skewness of Log transformed area data:", skewness(area_log)))
+
+# Calculate and Print the number of outliers
+number_of_outliers_areaT <- area_log %>% count_outliers()
+print(paste("Number of outliers in Area(km^2) after transformation is: ", number_of_outliers_areaT)) #24
+
+# Cap Outliers
+norm_area_no_outliers <- area_log %>% cap()
+norm_area_no_outliers  %>% count_outliers()
+norm_area_no_outliers  %>% boxplot(main="Normalised Area(Km^2) (outliers capped)", ylab="Area(Km^2)", col = "green", cex.main = 0.8)
+#mtext("Area(Km^2) Normalised + Outliers Capped", outer = TRUE, cex = 1.2)
+################################################################################
+# Transform Density.. per.km
+#Setup dimensions for output
+#par(mfrow = c(1, 2), oma = c(0, 0, 3, 0), mar = c(5, 4, 4, 2) + 0.1)
+
+#Baselne test on original data and count number of outliers
+shapiro.test(density)
+density_outliers <- density %>% count_outliers()
+print(paste("The number of outliers in density is: ", density_outliers)) #64
+
+#Transformation Trial and error
+
+# #BoxCox
+# BoxCox_density <- BoxCox(density, lambda = "auto")
+# hist(BoxCox_density)
+# shapiro.test(BoxCox_density) # ERROR/warnings - ineffective - unsure why
+
+#log
+density_log <- log(density)
+hist(density_log, main="Normalised Density", ylab="Density", cex.main = 0.8)
+shapiro.test(density_log) #This transformation is the most effective 
+
+# #sqrt
+# sqrt_density <- sqrt(density)
+# hist(sqrt_density)
+# shapiro.test(sqrt_density)
+# 
+# #cuberoot
+# cuberoot_density <- (density)^(1/3)
+# hist(cuberoot_density)
+# shapiro.test(cuberoot_density)
+
+# Print the skewness value for the transformed data
+print(paste("Skewness of Log transformed density data:", skewness(density_log))) #-0.59
+
+# Calculate and Print the number of outliers
+number_of_outliers_densityT <- density_log %>% count_outliers()
+print(paste("Number of outliers in density after transformation is: ", number_of_outliers_densityT)) #12
+
+# Cap Outliers
+norm_density_no_outliers <- density_log %>% cap()
+norm_density_no_outliers  %>% count_outliers()
+norm_density_no_outliers  %>% boxplot(main="Normalised Density (outliers capped)", ylab="Density", col = "green", cex.main = 0.8)
+#mtext("Population Density Normalised + Outliers Capped", outer = TRUE, cex = 1.2)
+################################################################################
+# Transform Population Percentage
+#Setup dimensions for output
+#par(mfrow = c(1, 2), oma = c(0, 0, 3, 0), mar = c(5, 4, 4, 2) + 0.1)
+
+#Baselne test on original data and count number of outliers
+shapiro.test(pop_percent)
+pop_percent_outliers <- pop_percent %>% count_outliers()
+print(paste("The number of outliers in Population Percentage is: ", pop_percent_outliers)) #72
+
+#Transformation Trial and error
+
+# #BoxCox
+# BoxCox_pop_percentage <- BoxCox(pop_percentage, lambda = "auto")
+# hist(BoxCox_pop_percentage)
+# shapiro.test(BoxCox_pop_percentage) # ERROR/warnings - ineffective - unsure why
+
+# #log
+# pop_percentage_log <- log(pop_percentage)
+# hist(pop_percentage_log)
+# shapiro.test(pop_percentage_log) #pvalue= NA W=Nan
+
+# #sqrt
+# sqrt_pop_percentage <- sqrt(pop_percentage)
+# hist(sqrt_pop_percentage)
+# shapiro.test(sqrt_pop_percentage)
+# 
+# #cuberoot
+# cuberoot_pop_percentage <- (pop_percentage)^(1/3)
+# hist(cuberoot_pop_percentage)
+# shapiro.test(cuberoot_pop_percentage)
+
+#fourthroot [3]
+fourthroot_pop_percent <- pop_percent^(1/4)
+hist(fourthroot_pop_percent, main="Normalised population percentage", ylab="Population Percentage", cex.main = 0.8)
+shapiro.test(fourthroot_pop_percent) # The best option closely followed by cuberoot
+
+# Print the skewness value for the transformed data
+print(paste("Skewness of fourth root transformed population percentage data:", skewness(fourthroot_pop_percent))) 
+
+# Calculate and Print the number of outliers
+number_of_outliers_pop_percT <- fourthroot_pop_percent %>% count_outliers()
+print(paste("Number of outliers in population percentage after transformation is: ", number_of_outliers_pop_percT)) #12
+
+# Cap Outliers
+norm_pop_perc_no_outliers <- fourthroot_pop_percent %>% cap()
+norm_pop_perc_no_outliers  %>% count_outliers()
+norm_pop_perc_no_outliers  %>% boxplot(main="Normalised Population Percentage (outliers capped)", ylab="Population Percentage", col = "green", cex.main = 0.8)
+#mtext("Population Percentage Normalised + Outliers Capped", outer = TRUE, cex = 1.2)
+################################################################################
+#Setup dimensions for output
+#par(mfrow = c(1, 2), oma = c(0, 0, 3, 0), mar = c(5, 4, 4, 2) + 0.1)
+
+# Transform No of Murders
+# Baselne test on original data and count number of outliers
+shapiro.test(murders)
+murders_outliers <- murders %>% count_outliers()
+print(paste("The number of outliers in Total Murders is: ", murders_outliers)) #105
+
+#Transformation Trial and error
+
+# #BoxCox
+# BoxCox_murders <- BoxCox(murders, lambda = "auto")
+# hist(BoxCox_murders)
+# shapiro.test(BoxCox_murders)
+
+#log
+murder_log <- log(murders)
+hist(murder_log, main="Normalised Total Murders", ylab="Total No of Murders", cex.main = 0.8)
+shapiro.test(murder_log) # murder_log is the 'most normal' after transformation compared to the other methods tried. Highest W score and largest p-value
+
+# #sqrt
+# sqrt_murder <- sqrt(murders)
+# hist(sqrt_murder)
+# shapiro.test(sqrt_murder)
+
+# Print the skewness value for the transformed data
+print(paste("Skewness of Log transformed murder data:", skewness(murder_log))) 
+
+# Calculate and Print the number of outliers
+number_of_outliers_murderT <- murder_log %>% count_outliers()
+print(paste("Number of outliers in Total No of Murders after transformation is: ", number_of_outliers_murderT)) #20
+
+# Cap Outliers
+norm_murders_no_outliers <- murder_log %>% cap()
+norm_murders_no_outliers  %>% count_outliers()
+norm_murders_no_outliers  %>% boxplot(main="Normalised Total No of Murders (outliers capped)", ylab="Number of Murders", col = "green", cex.main = 0.8)
+#mtext("Total No of Murders Normalised + Outliers Capped", outer = TRUE, cex = 1.2)
+################################################################################
+#Setup dimensions for output
+#par(mfrow = c(1, 2), oma = c(0, 0, 3, 0), mar = c(5, 4, 4, 2) + 0.1)
+
+#Transform murders per 100k
+# Baselne test on original data and count number of outliers
+shapiro.test(murder_rate)
+murder_rate_outliers <- murder_rate %>% count_outliers()
+print(paste("The number of outliers in murder rate is: ", murder_rate_outliers)) #75
+
+#Transformation Trial and error
+
+# #BoxCox
+# BoxCox_murdersper100 <- BoxCox(murders_per_100k, lambda = "auto")
+# hist(BoxCox_murdersper100)
+# shapiro.test(BoxCox_murdersper100)
+
+#log
+murder_rate_log <- log(murder_rate)
+hist(murder_rate_log, main="Normalised Murder Rate", ylab="Murders per 100,000 population", cex.main = 0.8)
+shapiro.test(murder_rate_log) # log transformation is the most effective compared to the other methods tried. Highest W score and largest p-value.
+
+# #sqrt
+# sqrt_murdersper100 <- sqrt(murders_per_100k)
+# hist(sqrt_murdersper100)
+# shapiro.test(sqrt_murdersper100)
+
+# Print the skewness value for the transformed data
+print(paste("Skewness of Log transformed Murders per 100,000 population data:", skewness(murder_rate_log))) 
+
+# Calculate and Print the number of outliers
+number_of_outliers_murder_rateT <- murder_rate_log %>% count_outliers()
+print(paste("Number of outliers in murder rate after transformation is: ", number_of_outliers_murder_rateT)) #2
+
+# Cap Outliers
+norm_murder_rate_no_outliers <- murder_rate_log %>% cap()
+norm_murder_rate_no_outliers  %>% count_outliers()
+norm_murder_rate_no_outliers  %>% boxplot(main="Normalised Murder Rate per 100k Population (outliers capped)", ylab="Murders per 100,000", col = "green", cex.main = 0.8)
+mtext("Transformed Variables with Outliers Capped", outer = TRUE, cex = 1.2)
+```
+
+The variables Population, Area..km.., Density..per.km.., Growth_rate, World_Population_Percentage, Total_No_of_Murders, and the mutated variable murder_rate_per100k are all heavilty skewed which was discovered when initially attempting to handle outliers. By applying transformations to the data prior to handling outliers, we improve the usability of the data for further statiscal analysis as well as significantly reduce the number of outliers in the data. Each variable is noted to be 'right skewed'. Transformations known to deal with right skewness were performed on each variable in a trial and error manner to determine which was the most effective. To keep the report concise, plots and code for the less effective transformations have been 'commented out', but left in place to show what has/hasn't been attempted for each variable. As seen in the outputs, shapiro wilk scores, skewness measures and number of outliers are improved after transformations are implemented. The shape of the transformed data can be compared with the boxplots generated in the previous section. Whilst none of the variables achieved exact normality, there are significant improvements which can be observed visually, and verified by improved shapiro wilk and skewness scores, indicating clear gains in normality across all variables. In an attempt to reduce the impact on the data, outliers in the previously skewed variables were capped at the 5th and 95th percentiles using a custom capping function defined at the top of the report. The boxplots in green show the variables normalised with outliers capped and this data can be used for further statistcal analysis.
+
+## **References**
+
+1.  Gapminder (2019). *Download the Data*. [online] Gapminder.org.
+    accessed 27 May 2024. Available at:
+    <https://www.gapminder.org/data/.>
+    
+2.  BANERJEE, S. (n.d.). *World Population Dataset*. [online]
+    www.kaggle.com. accessed 27 May 2024. Available at:
+    <https://www.kaggle.com/datasets/iamsouravbanerjee/world-population-dataset.>
+    
+3.  Statistical Modeling, Casual Inference, and Social Science (2007) *The 1/4-power transformation*. [online]
+    accessed 27 May 2024. Available at:
+    <https://statmodeling.stat.columbia.edu/2007/01/02/the_14power_tra/>
+    
+4.  RS Blog. (n.d.). *methods to find outliers in R (with examples)* [online]
+    accessed 27 May 2024. Available at:
+    <https://www.reneshbedre.com/blog/find-outliers.html>
+    
+5.  DigitalOcean. (2022) *How To Use sub() and gsub() in R* * [online]
+    accessed 27 May 2024. Available at:
+    <https://www.digitalocean.com/community/tutorials/sub-and-gsub-function-r>
